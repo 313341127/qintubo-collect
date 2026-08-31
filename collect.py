@@ -50,6 +50,9 @@ def d1(sql, params=None):
             if j.get('success'):
                 res = j.get('result', [])
                 return res[0]['results'] if res else []
+            else:
+                if os.environ.get('DEBUG'):
+                    print('D1错误:', json.dumps(j, ensure_ascii=False)[:400], 'SQL前80:', sql[:80], flush=True)
         except Exception:
             pass
         time.sleep(1)
@@ -145,33 +148,41 @@ def is_default_cover(cover):
     return any(f in l for f in DEFAULT_COVERS)
 
 
+def _esc(v):
+    if v is None:
+        return "''"
+    return "'" + str(v).replace("'", "''") + "'"
+
+
 def d1_batch_insert_movies(rows):
     if not rows:
         return 0
     cols = ['id', 'title', 'year', 'rate', 'duration', 'genres', 'plot', 'cover_url',
             'detail_url', 'type', 'actors', 'director', 'area', 'remark', 'fetched_at', 'play_count']
-    ph = ','.join(['?'] * len(cols))
-    sql = f"INSERT OR IGNORE INTO movies ({','.join(cols)}) VALUES ({ph})"
-    # D1 批量：多条 VALUES
-    sql = f"INSERT OR IGNORE INTO movies ({','.join(cols)}) VALUES " + ','.join(['(' + ph + ')'] * len(rows))
-    params = []
-    for r in rows:
-        params.extend([r[c] for c in cols])
-    d1(sql, params)
-    return len(rows)
+    n = 500
+    done = 0
+    for i in range(0, len(rows), n):
+        chunk = rows[i:i + n]
+        vals = ','.join('(' + ','.join(_esc(r[c]) for c in cols) + ')' for r in chunk)
+        sql = f"INSERT OR IGNORE INTO movies ({','.join(cols)}) VALUES {vals}"
+        d1(sql)
+        done += len(chunk)
+    return done
 
 
 def d1_batch_insert_playurls(rows):
     if not rows:
         return 0
     cols = ['movie_id', 'source', 'ep_title', 'play_url', 'flag', 'checked_at']
-    ph = ','.join(['?'] * len(cols))
-    sql = f"INSERT OR IGNORE INTO play_urls ({','.join(cols)}) VALUES " + ','.join(['(' + ph + ')'] * len(rows))
-    params = []
-    for r in rows:
-        params.extend([r[c] for c in cols])
-    d1(sql, params)
-    return len(rows)
+    n = 500
+    done = 0
+    for i in range(0, len(rows), n):
+        chunk = rows[i:i + n]
+        vals = ','.join('(' + ','.join(_esc(r[c]) for c in cols) + ')' for r in chunk)
+        sql = f"INSERT OR IGNORE INTO play_urls ({','.join(cols)}) VALUES {vals}"
+        d1(sql)
+        done += len(chunk)
+    return done
 
 
 def collect_source(src, start_page, max_pages):
