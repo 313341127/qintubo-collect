@@ -24,3 +24,4 @@ jobs:
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
           TIME_LIMIT: '1800'
+          MAX_PAGES: '1000'
