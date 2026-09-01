@@ -2,12 +2,15 @@ name: collect
 
 on:
   schedule:
-    - cron: '0 */12 * * *'   # 每12小时一次（控制 GitHub Actions 免费额度 2000分钟/月）
+    - cron: '0 */12 * * *'   # 每12小时一次兜底（控制 GitHub Actions 免费额度）
   workflow_dispatch:
 
 concurrency:
   group: collect
   cancel-in-progress: false
+
+permissions:
+  actions: write   # 允许采集脚本云端自接力(dispatch 下一轮)
 
 jobs:
   collect:
@@ -23,5 +26,6 @@ jobs:
         env:
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          GH_REPO: '313341127/qintubo-collect'
           TIME_LIMIT: '1800'
           MAX_PAGES: '1000'
