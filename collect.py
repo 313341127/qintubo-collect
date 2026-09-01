@@ -126,10 +126,13 @@ def make_id(title, year):
 
 def classify(type_id, title, genres):
     tid = int(type_id) if str(type_id).isdigit() else 0
+    g = (genres or '').lower()
+    # AI 漫剧/短剧优先识别：源站常把短剧 type_id 标为电影(1)，按 genres 归为短剧
+    if any(k in g for k in ['AI漫', '漫剧', '短剧', '微短剧', '竖屏']):
+        return '短剧'
     if tid in (1, 2, 3, 4):
         return {1: '电影', 2: '剧集', 3: '综艺', 4: '动漫'}[tid]
     t = (title or '').lower()
-    g = (genres or '').lower()
     if any(k in g for k in ['动画', '动漫', '卡通']):
         return '动漫'
     if any(k in g for k in ['综艺', '脱口秀', '真人秀']):
