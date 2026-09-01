@@ -332,9 +332,9 @@ def main():
         source_pages = json.loads(prog.get('source_pages') or '{}')
     except Exception:
         source_pages = {}
-    si = prog.get('source_index') or 0
-    total_collected = prog.get('total_collected') or 0
-    total_skipped = prog.get('total_skipped') or 0
+    si = int(prog.get('source_index') or 0)
+    total_collected = int(prog.get('total_collected') or 0)
+    total_skipped = int(prog.get('total_skipped') or 0)
 
     # 每次运行：从当前源开始，最多采 MAX_ROUNDS 个源，每源最多 MAX_PAGES 页
     # 全部源采完一轮后进入增量模式（每源只采最新 2 页）
