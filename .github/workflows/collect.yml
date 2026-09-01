@@ -2,7 +2,7 @@ name: collect
 
 on:
   schedule:
-    - cron: '20 * * * *'   # 每小时第20分钟
+    - cron: '0 */12 * * *'   # 每12小时一次（控制 GitHub Actions 免费额度 2000分钟/月）
   workflow_dispatch:
 
 concurrency:
@@ -12,7 +12,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,4 +24,4 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_DB_ID: ${{ secrets.CF_DB_ID }}
-          TIME_LIMIT: '3000'
+          TIME_LIMIT: '1800'
