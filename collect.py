@@ -39,7 +39,11 @@ START = time.time()
 TIME_LIMIT = int(os.environ.get('TIME_LIMIT', '3000'))  # 默认 50 分钟
 
 
+D1_FAIL_COUNT = 0  # 连续写入失败计数（存储保护）
+
+
 def d1(sql, params=None):
+    global D1_FAIL_COUNT
     body = {'sql': sql}
     if params is not None:
         body['params'] = params
@@ -49,13 +53,24 @@ def d1(sql, params=None):
             j = r.json()
             if j.get('success'):
                 res = j.get('result', [])
+                if sql.strip().upper().startswith('INSERT'):
+                    D1_FAIL_COUNT = 0
                 return res[0]['results'] if res else []
             else:
                 if os.environ.get('DEBUG'):
                     print('D1错误:', json.dumps(j, ensure_ascii=False)[:400], 'SQL前80:', sql[:80], flush=True)
+                # 数据库满或写入类错误，累计失败
+                if sql.strip().upper().startswith('INSERT'):
+                    D1_FAIL_COUNT += 1
+                    errmsg = json.dumps(j.get('errors', []), ensure_ascii=False)
+                    if 'Exceeded maximum DB size' in errmsg or 'TOOBIG' in errmsg:
+                        print('!! D1 存储不足或 SQL 超限，停止写入', flush=True)
+                        return 'FULL'
         except Exception:
             pass
         time.sleep(1)
+    if sql.strip().upper().startswith('INSERT'):
+        D1_FAIL_COUNT += 1
     return None
 
 
@@ -156,33 +171,39 @@ def _esc(v):
 
 def d1_batch_insert_movies(rows):
     if not rows:
-        return 0
+        return True
     cols = ['id', 'title', 'year', 'rate', 'duration', 'genres', 'plot', 'cover_url',
             'detail_url', 'type', 'actors', 'director', 'area', 'remark', 'fetched_at', 'play_count']
     n = 500
-    done = 0
+    ok = True
     for i in range(0, len(rows), n):
         chunk = rows[i:i + n]
         vals = ','.join('(' + ','.join(_esc(r[c]) for c in cols) + ')' for r in chunk)
         sql = f"INSERT OR IGNORE INTO movies ({','.join(cols)}) VALUES {vals}"
-        d1(sql)
-        done += len(chunk)
-    return done
+        if d1(sql) == 'FULL':
+            ok = False
+            break
+    return ok
 
 
 def d1_batch_insert_playurls(rows):
     if not rows:
-        return 0
-    cols = ['movie_id', 'source', 'ep_title', 'play_url', 'flag', 'checked_at']
-    n = 500
-    done = 0
+        return True
+    cols = ['movie_id', 'source', 'ep_title', 'play_url']
+    n = 700  # SQL 大小需控制在 D1 限制内（~73KB），700 行约 50KB 安全
+    ok = True
     for i in range(0, len(rows), n):
         chunk = rows[i:i + n]
         vals = ','.join('(' + ','.join(_esc(r[c]) for c in cols) + ')' for r in chunk)
         sql = f"INSERT OR IGNORE INTO play_urls ({','.join(cols)}) VALUES {vals}"
-        d1(sql)
-        done += len(chunk)
-    return done
+        if d1(sql) == 'FULL':
+            ok = False
+            break
+    return ok
+
+
+MAX_EPS = 300  # 每片最多保留的集数（控制存储，超出截断）
+MAX_SOURCE_LINES = 3  # 每片最多保留的源线路数（多线路=多个源）
 
 
 def collect_source(src, start_page, max_pages):
@@ -258,17 +279,19 @@ def collect_source(src, start_page, max_pages):
                 'area': d.get('vod_area') or '', 'remark': d.get('vod_remarks') or '',
                 'fetched_at': now, 'play_count': 0,
             })
-            for ep in eps:
+            for ep in eps[:MAX_EPS]:
                 play_rows.append({
                     'movie_id': mid, 'source': name, 'ep_title': ep['title'],
-                    'play_url': ep['url'], 'flag': '', 'checked_at': now,
+                    'play_url': ep['url'],
                 })
             collected += 1
 
         if movie_rows:
-            d1_batch_insert_movies(movie_rows)
+            if not d1_batch_insert_movies(movie_rows):
+                return (collected, skipped, noeps, detailfail, pages_done, f'页{start_page}->{page-1} 存储满停止')
         if play_rows:
-            d1_batch_insert_playurls(play_rows)
+            if not d1_batch_insert_playurls(play_rows):
+                return (collected, skipped, noeps, detailfail, pages_done, f'页{start_page}->{page-1} 存储满停止')
 
         page += 1
         pages_done += 1
@@ -283,8 +306,8 @@ def main():
         print('缺少 Cloudflare 环境变量')
         sys.exit(1)
 
-    # 确保 play_urls 唯一索引（多线路去重）
-    d1("CREATE UNIQUE INDEX IF NOT EXISTS idx_play_uniq ON play_urls(movie_id, source, ep_title, play_url)")
+    # 确保 play_urls 唯一索引（3 列精简索引，多线路去重 + 控制存储）
+    d1("CREATE UNIQUE INDEX IF NOT EXISTS idx_play_uniq ON play_urls(movie_id, source, ep_title)")
 
     # 读进度
     rows = d1('SELECT source_index, source_pages, total_collected, total_skipped FROM collect_progress WHERE id=1')
@@ -305,7 +328,7 @@ def main():
     done_all = d1("SELECT 1 AS x FROM collect_progress WHERE last_result LIKE 'ALLDONE%'")
     incr_mode = bool(done_all)
     MAX_ROUNDS = len(SOURCES)
-    MAX_PAGES = 2 if incr_mode else int(os.environ.get('MAX_PAGES', '140'))
+    MAX_PAGES = 2 if incr_mode else int(os.environ.get('MAX_PAGES', '30'))
     rounds = 0
     done_count = 0
     while rounds < MAX_ROUNDS and (time.time() - START) < TIME_LIMIT:
@@ -332,6 +355,10 @@ def main():
         d1('UPDATE collect_progress SET source_index=?, source_pages=?, total_collected=?, total_skipped=?, last_run=?, last_result=? WHERE id=1',
            [si, json.dumps(source_pages), total_collected, total_skipped,
             time.strftime('%Y-%m-%d %H:%M:%S'), last_result])
+        # 存储保护：D1 满（写入失败累计>=3 或本次返回"存储满"）则停止本轮
+        if D1_FAIL_COUNT >= 3 or '存储满' in msg:
+            print('!! 存储不足，停止采集，等待扩容或清理', flush=True)
+            break
 
     print(f'=== 本次完成：累计采集 {total_collected} 部 ===', flush=True)
 
