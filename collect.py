@@ -353,6 +353,7 @@ def main():
     MAX_PAGES = 2 if incr_mode else int(os.environ.get('MAX_PAGES', '30'))
     rounds = 0
     done_count = 0
+    stopped_by_write_fail = False
     while rounds < MAX_ROUNDS and (time.time() - START) < TIME_LIMIT:
         src = SOURCES[si % len(SOURCES)]
         page = int(source_pages.get(str(si), 1))
@@ -380,28 +381,32 @@ def main():
         # 容错：写入失败累计>=3 或本次返回"存储满"则停止本轮
         if WRITE_FAIL >= 3 or '写入失败' in msg:
             print('!! 写入持续失败，停止本轮采集', flush=True)
+            stopped_by_write_fail = True
             break
 
     print(f'=== 本次完成：累计采集 {total_collected} 部 ===', flush=True)
 
     # ===== 云端自接力（关机也可持续全量采集） =====
-    # 若未全量完成(无 ALLDONE)，自动 dispatch 触发下一轮，直到全量完成
+    # 若未全量完成(无 ALLDONE)且未因写入失败停止，自动 dispatch 触发下一轮，直到全量完成
     try:
-        fin = db('SELECT last_result FROM collect_progress WHERE id=1')
-        if fin and not str(fin[0].get('last_result') or '').startswith('ALLDONE'):
-            tok = os.environ.get('GH_PAT') or os.environ.get('GITHUB_TOKEN') or ''
-            repo = os.environ.get('GH_REPO', '313341127/qintubo-collect')
-            if tok:
-                r = requests.post(
-                    f'https://api.github.com/repos/{repo}/actions/workflows/collect.yml/dispatches',
-                    headers={'Authorization': f'token {tok}', 'Accept': 'application/vnd.github+json',
-                             'User-Agent': 'qintubo-collect', 'Content-Type': 'application/json'},
-                    json={'ref': 'main'}, timeout=30)
-                print(f'=== 云端自接力：未全量完成，已触发下一轮 (HTTP {r.status_code}) ===', flush=True)
-            else:
-                print('=== 无 GITHUB_TOKEN，跳过自接力 ===', flush=True)
+        if stopped_by_write_fail:
+            print('=== 写入被封锁/持续失败，停止自接力（避免空跑浪费 Actions 额度） ===', flush=True)
         else:
-            print('=== 全量采集完成(ALLDONE)，停止自接力 ===', flush=True)
+            fin = db('SELECT last_result FROM collect_progress WHERE id=1')
+            if fin and not str(fin[0].get('last_result') or '').startswith('ALLDONE'):
+                tok = os.environ.get('GH_PAT') or os.environ.get('GITHUB_TOKEN') or ''
+                repo = os.environ.get('GH_REPO', '313341127/qintubo-collect')
+                if tok:
+                    r = requests.post(
+                        f'https://api.github.com/repos/{repo}/actions/workflows/collect.yml/dispatches',
+                        headers={'Authorization': f'token {tok}', 'Accept': 'application/vnd.github+json',
+                                 'User-Agent': 'qintubo-collect', 'Content-Type': 'application/json'},
+                        json={'ref': 'main'}, timeout=30)
+                    print(f'=== 云端自接力：未全量完成，已触发下一轮 (HTTP {r.status_code}) ===', flush=True)
+                else:
+                    print('=== 无 GITHUB_TOKEN，跳过自接力 ===', flush=True)
+            else:
+                print('=== 全量采集完成(ALLDONE)，停止自接力 ===', flush=True)
     except Exception as e:
         print('云端自接力失败:', str(e)[:150], flush=True)
 
