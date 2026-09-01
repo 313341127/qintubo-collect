@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   actions: write   # 允许采集脚本云端自接力(dispatch 下一轮)
+  contents: read   # checkout 需要读取仓库
 
 jobs:
   collect:
