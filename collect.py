@@ -389,7 +389,7 @@ def main():
     try:
         fin = db('SELECT last_result FROM collect_progress WHERE id=1')
         if fin and not str(fin[0].get('last_result') or '').startswith('ALLDONE'):
-            tok = os.environ.get('GITHUB_TOKEN') or ''
+            tok = os.environ.get('GH_PAT') or os.environ.get('GITHUB_TOKEN') or ''
             repo = os.environ.get('GH_REPO', '313341127/qintubo-collect')
             if tok:
                 r = requests.post(
