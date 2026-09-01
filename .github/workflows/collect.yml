@@ -27,5 +27,6 @@ jobs:
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
           GH_REPO: '313341127/qintubo-collect'
+          GH_PAT: ${{ secrets.GH_PAT }}
           TIME_LIMIT: '1800'
           MAX_PAGES: '1000'
