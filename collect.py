@@ -280,8 +280,14 @@ def collect_source(src, start_page, max_pages):
             year = d.get('vod_year') or ''
             mid = make_id(title, year)
             mtype = classify(d.get('type_id'), title, d.get('vod_class') or '')
-            if mtype == '电影' and len(eps) > 1:
-                mtype = '剧集' if len(eps) > 20 else '短剧'
+            if mtype == '电影':
+                remark = (d.get('vod_remarks') or '')
+                if re.search(r'全集|集全|全\d+集|完结', remark):
+                    mtype = '短剧'
+                elif len(eps) > 20:
+                    mtype = '剧集'
+                elif len(eps) > 1:
+                    mtype = '短剧'
             raw_cover = d.get('vod_pic') or ''
             if is_default_cover(raw_cover):
                 raw_cover = ''
