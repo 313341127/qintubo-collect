@@ -310,10 +310,10 @@ def collect_source(src, start_page, max_pages):
 
         if movie_rows:
             if not d1_batch_insert_movies(movie_rows):
-                return (collected, skipped, noeps, detailfail, pages_done, f'页{start_page}->{page-1} 存储满停止')
+                return (collected, skipped, noeps, detailfail, pages_done, f'页{start_page}->{page-1} 写入失败停止')
         if play_rows:
             if not d1_batch_insert_playurls(play_rows):
-                return (collected, skipped, noeps, detailfail, pages_done, f'页{start_page}->{page-1} 存储满停止')
+                return (collected, skipped, noeps, detailfail, pages_done, f'页{start_page}->{page-1} 写入失败停止')
 
         page += 1
         pages_done += 1
@@ -378,7 +378,7 @@ def main():
            [si, json.dumps(source_pages), total_collected, total_skipped,
             time.strftime('%Y-%m-%d %H:%M:%S'), last_result])
         # 容错：写入失败累计>=3 或本次返回"存储满"则停止本轮
-        if WRITE_FAIL >= 3 or '存储满' in msg:
+        if WRITE_FAIL >= 3 or '写入失败' in msg:
             print('!! 写入持续失败，停止本轮采集', flush=True)
             break
 
