@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GitHub Actions 云端采集：苹果CMS源站 -> Cloudflare D1
+"""GitHub Actions 云端采集：苹果CMS源站 -> Turso (SQLite 云)
 - 多源全量采集 + 去重（id=title|year 哈希，INSERT OR IGNORE）
 - 多线路（同片多源都写 play_urls）
-- 断点续传（进度存 D1 collect_progress）
+- 断点续传（进度存 collect_progress）
 - 封面直接用源站 URL，过滤默认图
 """
 import requests, urllib3, json, os, time, re, sys
@@ -11,11 +11,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 urllib3.disable_warnings()
 
-CF_ACCOUNT = os.environ.get('CF_ACCOUNT_ID', '')
-CF_TOKEN = os.environ.get('CF_API_TOKEN', '')
-CF_DB = os.environ.get('CF_DB_ID', '')
-D1_URL = f'https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT}/d1/database/{CF_DB}/query'
-HEAD = {'Authorization': f'Bearer {CF_TOKEN}', 'Content-Type': 'application/json'}
+TURSO_URL = os.environ.get('TURSO_URL', '')
+TURSO_TOKEN = os.environ.get('TURSO_TOKEN', '')
+TH = {'Authorization': f'Bearer {TURSO_TOKEN}', 'Content-Type': 'application/json'}
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 
 SOURCES = [
@@ -38,39 +36,54 @@ DEFAULT_COVERS = [
 START = time.time()
 TIME_LIMIT = int(os.environ.get('TIME_LIMIT', '3000'))  # 默认 50 分钟
 
+WRITE_FAIL = 0  # 连续写入失败计数（容错）
 
-D1_FAIL_COUNT = 0  # 连续写入失败计数（存储保护）
+
+def _turso_args(args):
+    if not args:
+        return None
+    return [{'type': 'text', 'value': '' if a is None else str(a)} for a in args]
 
 
-def d1(sql, params=None):
-    global D1_FAIL_COUNT
-    body = {'sql': sql}
+def db(sql, params=None):
+    """执行 SQL，返回 dict 列表（SELECT）或 []"""
+    global WRITE_FAIL
+    req = {'type': 'execute', 'stmt': {'sql': sql}}
     if params is not None:
-        body['params'] = params
+        req['stmt']['args'] = _turso_args(params)
     for _ in range(3):
         try:
-            r = requests.post(D1_URL, headers=HEAD, json=body, timeout=40)
+            r = requests.post(f'{TURSO_URL}/v2/pipeline', headers=TH,
+                              json={'requests': [req]}, timeout=45)
             j = r.json()
-            if j.get('success'):
-                res = j.get('result', [])
-                if sql.strip().upper().startswith('INSERT'):
-                    D1_FAIL_COUNT = 0
-                return res[0]['results'] if res else []
-            else:
-                if os.environ.get('DEBUG'):
-                    print('D1错误:', json.dumps(j, ensure_ascii=False)[:400], 'SQL前80:', sql[:80], flush=True)
-                # 数据库满或写入类错误，累计失败
-                if sql.strip().upper().startswith('INSERT'):
-                    D1_FAIL_COUNT += 1
-                    errmsg = json.dumps(j.get('errors', []), ensure_ascii=False)
-                    if 'Exceeded maximum DB size' in errmsg or 'TOOBIG' in errmsg:
-                        print('!! D1 存储不足或 SQL 超限，停止写入', flush=True)
-                        return 'FULL'
-        except Exception:
-            pass
+            results = j.get('results')
+            if results and not j.get('error'):
+                res0 = results[0]
+                if res0.get('type') == 'ok':
+                    if sql.strip().upper().startswith('INSERT'):
+                        WRITE_FAIL = 0
+                    out = res0.get('response', {}).get('result', {})
+                    cols = [c['name'] for c in out.get('cols', [])]
+                    rows = out.get('rows', [])
+                    # Turso 返回类型化值 {'type':..., 'value':...}，解包为纯值
+                    def unwrap(v):
+                        if isinstance(v, dict) and 'type' in v:
+                            return v.get('value')
+                        return v
+                    return [{c: unwrap(r[i]) for i, c in enumerate(cols)} for r in rows]
+                return []
+            # 错误处理
+            err = json.dumps(j.get('error') or results, ensure_ascii=False)
+            if 'already exists' in err.lower() or 'unique constraint' in err.lower():
+                return []
+            if sql.strip().upper().startswith('INSERT'):
+                WRITE_FAIL += 1
+            print('DB错误:', err[:200], 'SQL前80:', sql[:80], flush=True)
+        except Exception as e:
+            if sql.strip().upper().startswith('INSERT'):
+                WRITE_FAIL += 1
+            print('DB重试:', str(e)[:80], flush=True)
         time.sleep(1)
-    if sql.strip().upper().startswith('INSERT'):
-        D1_FAIL_COUNT += 1
     return None
 
 
@@ -180,7 +193,7 @@ def d1_batch_insert_movies(rows):
         chunk = rows[i:i + n]
         vals = ','.join('(' + ','.join(_esc(r[c]) for c in cols) + ')' for r in chunk)
         sql = f"INSERT OR IGNORE INTO movies ({','.join(cols)}) VALUES {vals}"
-        if d1(sql) == 'FULL':
+        if db(sql) is None:
             ok = False
             break
     return ok
@@ -190,13 +203,13 @@ def d1_batch_insert_playurls(rows):
     if not rows:
         return True
     cols = ['movie_id', 'source', 'ep_title', 'play_url']
-    n = 700  # SQL 大小需控制在 D1 限制内（~73KB），700 行约 50KB 安全
+    n = 700
     ok = True
     for i in range(0, len(rows), n):
         chunk = rows[i:i + n]
         vals = ','.join('(' + ','.join(_esc(r[c]) for c in cols) + ')' for r in chunk)
         sql = f"INSERT OR IGNORE INTO play_urls ({','.join(cols)}) VALUES {vals}"
-        if d1(sql) == 'FULL':
+        if db(sql) is None:
             ok = False
             break
     return ok
@@ -302,18 +315,18 @@ def collect_source(src, start_page, max_pages):
 
 
 def main():
-    if not (CF_ACCOUNT and CF_TOKEN and CF_DB):
-        print('缺少 Cloudflare 环境变量')
+    if not (TURSO_URL and TURSO_TOKEN):
+        print('缺少 Turso 环境变量')
         sys.exit(1)
 
-    # 确保 play_urls 唯一索引（3 列精简索引，多线路去重 + 控制存储）
-    d1("CREATE UNIQUE INDEX IF NOT EXISTS idx_play_uniq ON play_urls(movie_id, source, ep_title)")
+    # 确保 play_urls 唯一索引（3 列精简索引，多线路去重）
+    db("CREATE UNIQUE INDEX IF NOT EXISTS idx_play_uniq ON play_urls(movie_id, source, ep_title)")
 
     # 读进度
-    rows = d1('SELECT source_index, source_pages, total_collected, total_skipped FROM collect_progress WHERE id=1')
+    rows = db('SELECT source_index, source_pages, total_collected, total_skipped FROM collect_progress WHERE id=1')
     if not rows:
-        d1("INSERT INTO collect_progress (id, source_index, source_pages, total_collected, total_skipped) VALUES (1, 0, '{}', 0, 0)")
-        rows = d1('SELECT source_index, source_pages, total_collected, total_skipped FROM collect_progress WHERE id=1')
+        db("INSERT INTO collect_progress (id, source_index, source_pages, total_collected, total_skipped) VALUES (1, 0, '{}', 0, 0)")
+        rows = db('SELECT source_index, source_pages, total_collected, total_skipped FROM collect_progress WHERE id=1')
     prog = rows[0]
     try:
         source_pages = json.loads(prog.get('source_pages') or '{}')
@@ -325,7 +338,7 @@ def main():
 
     # 每次运行：从当前源开始，最多采 MAX_ROUNDS 个源，每源最多 MAX_PAGES 页
     # 全部源采完一轮后进入增量模式（每源只采最新 2 页）
-    done_all = d1("SELECT 1 AS x FROM collect_progress WHERE last_result LIKE 'ALLDONE%'")
+    done_all = db("SELECT 1 AS x FROM collect_progress WHERE last_result LIKE 'ALLDONE%'")
     incr_mode = bool(done_all)
     MAX_ROUNDS = len(SOURCES)
     MAX_PAGES = 2 if incr_mode else int(os.environ.get('MAX_PAGES', '30'))
@@ -352,12 +365,12 @@ def main():
         last_result = f'源{src["name"]} {msg} 采{collected}'
         if done_count == len(SOURCES):
             last_result = 'ALLDONE 全量第一轮完成，进入增量模式'
-        d1('UPDATE collect_progress SET source_index=?, source_pages=?, total_collected=?, total_skipped=?, last_run=?, last_result=? WHERE id=1',
+        db('UPDATE collect_progress SET source_index=?, source_pages=?, total_collected=?, total_skipped=?, last_run=?, last_result=? WHERE id=1',
            [si, json.dumps(source_pages), total_collected, total_skipped,
             time.strftime('%Y-%m-%d %H:%M:%S'), last_result])
-        # 存储保护：D1 满（写入失败累计>=3 或本次返回"存储满"）则停止本轮
-        if D1_FAIL_COUNT >= 3 or '存储满' in msg:
-            print('!! 存储不足，停止采集，等待扩容或清理', flush=True)
+        # 容错：写入失败累计>=3 或本次返回"存储满"则停止本轮
+        if WRITE_FAIL >= 3 or '存储满' in msg:
+            print('!! 写入持续失败，停止本轮采集', flush=True)
             break
 
     print(f'=== 本次完成：累计采集 {total_collected} 部 ===', flush=True)
