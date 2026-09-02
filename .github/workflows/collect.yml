@@ -21,11 +21,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install requests -q
+      - run: pip install requests pymysql -q
       - run: python collect.py
         env:
-          TURSO_URL: ${{ secrets.TURSO_URL }}
-          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          TIDB_HOST: ${{ secrets.TIDB_HOST }}
+          TIDB_PORT: '4000'
+          TIDB_USER: ${{ secrets.TIDB_USER }}
+          TIDB_PWD: ${{ secrets.TIDB_PWD }}
+          TIDB_DB: 'qintubo'
           GH_REPO: '313341127/qintubo-collect'
           GH_PAT: ${{ secrets.GH_PAT }}
           TIME_LIMIT: '1800'
