@@ -1,8 +1,7 @@
 name: collect
 
 on:
-  schedule:
-    - cron: '0 */12 * * *'   # 每12小时一次兜底（控制 GitHub Actions 免费额度）
+  # schedule 已临时禁用（Turso 免费写入配额 9 月已耗尽，空跑无意义，等 10/1 配额重置后再启用）
   workflow_dispatch:
 
 concurrency:
