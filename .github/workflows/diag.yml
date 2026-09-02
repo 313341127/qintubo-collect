@@ -6,23 +6,13 @@ on:
 jobs:
   diag:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: 测试各源站可达性
-        shell: bash
-        run: |
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-          for url in \
-            "https://www.iqiyizyapi.com/api.php/provide/vod/?ac=detail&pg=1" \
-            "https://www.mdzyapi.com/api.php/provide/vod/?ac=detail&pg=1" \
-            "https://zuidazy.com/api.php/provide/vod/?ac=detail&pg=1" \
-            "http://suonizy.com/api.php/provide/vod/?ac=detail&pg=1" \
-            "https://api.wujinapi.com/api.php/provide/vod/?ac=detail&pg=1" \
-            "https://subocaiji.com/api.php/provide/vod/?ac=detail&pg=1" \
-            "https://bfzyapi.com/api.php/provide/vod/?ac=detail&pg=1" \
-            "http://cj.ffzyapi.com/api.php/provide/vod/?ac=detail&pg=1" ; do
-            echo "=== $url ==="
-            curl -sS -o /tmp/out.bin -w 'HTTP=%{http_code} connect=%{time_connect}s total=%{time_total}s size=%{size_download}\n' \
-              --max-time 25 -A "$UA" -k "$url" || echo "CURL_FAIL exit=$?"
-            head -c 120 /tmp/out.bin 2>/dev/null | tr -d '\n'; echo
-          done
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装依赖
+        run: pip install -q requests pymysql
+      - name: 复现采集网络
+        run: python diag_collect.py
