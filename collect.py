@@ -252,8 +252,8 @@ def collect_source(src, start_page, max_pages, existing_movies=None, existing_pl
     pages_done = 0
     try:
         _t0 = time.time()
-        j = get_json(f'{base}/api.php/provide/vod/?ac=list&pg={page}')
-        print(f'  [net] ac=list pg={page} sec={round(time.time()-_t0,1)} ok={bool(j)}', flush=True)
+        j = get_json(f'{base}/api.php/provide/vod/?ac=detail&pg={page}')
+        print(f'  [net] ac=detail pg={page} sec={round(time.time()-_t0,1)} ok={bool(j)}', flush=True)
         if not j:
             return (collected, skipped, noeps, detailfail, 0, 'list请求失败')
         pagecount = int(j.get('pagecount') or 0)
@@ -263,32 +263,14 @@ def collect_source(src, start_page, max_pages, existing_movies=None, existing_pl
     while pages_done < max_pages and (time.time() - START) < TIME_LIMIT:
         if page > pagecount:
             break
-        j = get_json(f'{base}/api.php/provide/vod/?ac=list&pg={page}')
+        j = get_json(f'{base}/api.php/provide/vod/?ac=detail&pg={page}')
         if not j or not j.get('list'):
             # 尝试下一页
             page += 1
             pages_done += 1
             continue
-        lst = j.get('list') or []
-
-        def fetch_detail(m):
-            vid = m.get('vod_id')
-            if not vid:
-                return None
-            d = get_json(f'{base}/api.php/provide/vod/?ac=detail&ids={vid}')
-            if not d or not d.get('list'):
-                return None
-            return d['list'][0]
-
-        items = []
-        _t1 = time.time()
-        with ThreadPoolExecutor(max_workers=16) as ex:
-            futs = [ex.submit(fetch_detail, m) for m in lst]
-            for f in as_completed(futs):
-                d = f.result()
-                if d:
-                    items.append(d)
-        print(f'  [net] detail x{len(lst)} -> {len(items)} sec={round(time.time()-_t1,1)}', flush=True)
+        # 单请求已含整页完整详情（含 vod_play_url / vod_pic），无需再逐个请求 detail
+        items = j.get('list') or []
 
         movie_rows = []
         play_rows = []
