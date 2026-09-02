@@ -29,7 +29,7 @@ def _get_conn():
         _conn = None
     _conn = pymysql.connect(host=TIDB_HOST, port=TIDB_PORT, user=TIDB_USER,
                             password=TIDB_PWD, database=TIDB_DB, charset='utf8mb4',
-                            autocommit=False, connect_timeout=30, read_timeout=120, write_timeout=120)
+                            autocommit=False, connect_timeout=30, read_timeout=300, write_timeout=300)
     return _conn
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 
@@ -54,6 +54,23 @@ START = time.time()
 TIME_LIMIT = int(os.environ.get('TIME_LIMIT', '3000'))  # 默认 50 分钟
 
 WRITE_FAIL = 0  # 连续写入失败计数（容错）
+
+
+def load_existing_plays():
+    """流式加载已有 (movie_id, source) 线路，避免大结果集一次传输超时"""
+    conn = _get_conn()
+    cur = conn.cursor(pymysql.cursors.SSCursor)
+    cur.execute('SELECT DISTINCT movie_id, source FROM play_urls')
+    s = set()
+    while True:
+        rows = cur.fetchmany(50000)
+        if not rows:
+            break
+        for r in rows:
+            s.add((r[0], r[1]))
+    cur.close()
+    print('加载已有线路 %d 条' % len(s), flush=True)
+    return s
 
 
 def db(sql, params=None):
@@ -367,10 +384,9 @@ def main():
     except Exception:
         existing_movies = None
     try:
-        _rows = db('SELECT DISTINCT movie_id, source FROM play_urls')
-        if _rows:
-            existing_plays = {(r['movie_id'], r['source']) for r in _rows}
-    except Exception:
+        existing_plays = load_existing_plays()
+    except Exception as e:
+        print('加载已有线路失败:', str(e)[:120], flush=True)
         existing_plays = None
     print(f'低写入模式：已有影片 {len(existing_movies or [])} 部 / 已有源线路 {len(existing_plays or [])} 条', flush=True)
 
