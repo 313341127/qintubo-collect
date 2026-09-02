@@ -222,7 +222,7 @@ MAX_EPS = 300  # 每片最多保留的集数（控制存储，超出截断）
 MAX_SOURCE_LINES = 3  # 每片最多保留的源线路数（多线路=多个源）
 
 
-def collect_source(src, start_page, max_pages):
+def collect_source(src, start_page, max_pages, existing_movies=None, existing_plays=None):
     """采集单个源，返回 (collected, skipped, noeps, detailfail, pages_done)"""
     base = src['base']
     name = src['name']
@@ -293,19 +293,27 @@ def collect_source(src, start_page, max_pages):
                 raw_cover = ''
             rate = d.get('vod_score') or d.get('vod_douban_score') or ''
             now = time.strftime('%Y-%m-%d %H:%M:%S')
-            movie_rows.append({
-                'id': mid, 'title': ct, 'year': str(year), 'rate': str(rate)[:8],
-                'duration': '', 'genres': d.get('vod_class') or '', 'plot': d.get('vod_content') or '',
-                'cover_url': raw_cover, 'detail_url': '', 'type': mtype,
-                'actors': d.get('vod_actor') or '', 'director': d.get('vod_director') or '',
-                'area': d.get('vod_area') or '', 'remark': d.get('vod_remarks') or '',
-                'fetched_at': now, 'play_count': 0,
-            })
-            for ep in eps[:MAX_EPS]:
-                play_rows.append({
-                    'movie_id': mid, 'source': name, 'ep_title': ep['title'],
-                    'play_url': ep['url'],
+            mid_exists = existing_movies is not None and mid in existing_movies
+            src_exists = existing_plays is not None and (mid, name) in existing_plays
+            if mid_exists and src_exists:
+                # 该电影+该源已完全采过，跳过避免重复写入（省 Turso 写入配额）
+                skipped += 1
+                continue
+            if not mid_exists:
+                movie_rows.append({
+                    'id': mid, 'title': ct, 'year': str(year), 'rate': str(rate)[:8],
+                    'duration': '', 'genres': d.get('vod_class') or '', 'plot': d.get('vod_content') or '',
+                    'cover_url': raw_cover, 'detail_url': '', 'type': mtype,
+                    'actors': d.get('vod_actor') or '', 'director': d.get('vod_director') or '',
+                    'area': d.get('vod_area') or '', 'remark': d.get('vod_remarks') or '',
+                    'fetched_at': now, 'play_count': 0,
                 })
+            if not src_exists:
+                for ep in eps[:MAX_EPS]:
+                    play_rows.append({
+                        'movie_id': mid, 'source': name, 'ep_title': ep['title'],
+                        'play_url': ep['url'],
+                    })
             collected += 1
 
         if movie_rows:
@@ -345,6 +353,23 @@ def main():
     total_collected = int(prog.get('total_collected') or 0)
     total_skipped = int(prog.get('total_skipped') or 0)
 
+    # 低写入模式：加载已存在记录，只对真正新增的发起写入（省 Turso 写入配额）
+    existing_movies = None
+    existing_plays = None
+    try:
+        _rows = db('SELECT id FROM movies')
+        if _rows:
+            existing_movies = {r['id'] for r in _rows}
+    except Exception:
+        existing_movies = None
+    try:
+        _rows = db('SELECT DISTINCT movie_id, source FROM play_urls')
+        if _rows:
+            existing_plays = {(r['movie_id'], r['source']) for r in _rows}
+    except Exception:
+        existing_plays = None
+    print(f'低写入模式：已有影片 {len(existing_movies or [])} 部 / 已有源线路 {len(existing_plays or [])} 条', flush=True)
+
     # 每次运行：从当前源开始，最多采 MAX_ROUNDS 个源，每源最多 MAX_PAGES 页
     # 全部源采完一轮后进入增量模式（每源只采最新 2 页）
     done_all = db("SELECT 1 AS x FROM collect_progress WHERE last_result LIKE 'ALLDONE%'")
@@ -358,7 +383,7 @@ def main():
         src = SOURCES[si % len(SOURCES)]
         page = int(source_pages.get(str(si), 1))
         print(f'[{src["name"]}] 模式{"增量" if incr_mode else "全量"} page={page}', flush=True)
-        collected, skipped, noeps, detailfail, pdone, msg = collect_source(src, page, MAX_PAGES)
+        collected, skipped, noeps, detailfail, pdone, msg = collect_source(src, page, MAX_PAGES, existing_movies, existing_plays)
         total_collected += collected
         total_skipped += skipped + noeps
         is_done = '完成' in msg
