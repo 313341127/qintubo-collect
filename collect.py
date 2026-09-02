@@ -251,7 +251,9 @@ def collect_source(src, start_page, max_pages, existing_movies=None, existing_pl
     page = start_page
     pages_done = 0
     try:
+        _t0 = time.time()
         j = get_json(f'{base}/api.php/provide/vod/?ac=list&pg={page}')
+        print(f'  [net] ac=list pg={page} sec={round(time.time()-_t0,1)} ok={bool(j)}', flush=True)
         if not j:
             return (collected, skipped, noeps, detailfail, 0, 'list请求失败')
         pagecount = int(j.get('pagecount') or 0)
@@ -279,12 +281,14 @@ def collect_source(src, start_page, max_pages, existing_movies=None, existing_pl
             return d['list'][0]
 
         items = []
+        _t1 = time.time()
         with ThreadPoolExecutor(max_workers=16) as ex:
             futs = [ex.submit(fetch_detail, m) for m in lst]
             for f in as_completed(futs):
                 d = f.result()
                 if d:
                     items.append(d)
+        print(f'  [net] detail x{len(lst)} -> {len(items)} sec={round(time.time()-_t1,1)}', flush=True)
 
         movie_rows = []
         play_rows = []
@@ -338,11 +342,15 @@ def collect_source(src, start_page, max_pages, existing_movies=None, existing_pl
             collected += 1
 
         if movie_rows:
+            _t2 = time.time()
             if not d1_batch_insert_movies(movie_rows):
                 return (collected, skipped, noeps, detailfail, pages_done, f'页{start_page}->{page-1} 写入失败停止')
+            print(f'  [db] insert movies {len(movie_rows)} sec={round(time.time()-_t2,1)}', flush=True)
         if play_rows:
+            _t2 = time.time()
             if not d1_batch_insert_playurls(play_rows):
                 return (collected, skipped, noeps, detailfail, pages_done, f'页{start_page}->{page-1} 写入失败停止')
+            print(f'  [db] insert playurls {len(play_rows)} sec={round(time.time()-_t2,1)}', flush=True)
 
         page += 1
         pages_done += 1
