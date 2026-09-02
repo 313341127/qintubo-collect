@@ -7,13 +7,30 @@
 - 封面直接用源站 URL，过滤默认图
 """
 import requests, urllib3, json, os, time, re, sys
+import pymysql
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 urllib3.disable_warnings()
 
-TURSO_URL = os.environ.get('TURSO_URL', '')
-TURSO_TOKEN = os.environ.get('TURSO_TOKEN', '')
-TH = {'Authorization': f'Bearer {TURSO_TOKEN}', 'Content-Type': 'application/json'}
+TIDB_HOST = os.environ.get('TIDB_HOST', '')
+TIDB_PORT = int(os.environ.get('TIDB_PORT', '4000'))
+TIDB_USER = os.environ.get('TIDB_USER', '')
+TIDB_PWD = os.environ.get('TIDB_PWD', '')
+TIDB_DB = os.environ.get('TIDB_DB', 'qintubo')
+
+_conn = None
+def _get_conn():
+    global _conn
+    try:
+        if _conn is not None:
+            _conn.ping(reconnect=True)
+            return _conn
+    except Exception:
+        _conn = None
+    _conn = pymysql.connect(host=TIDB_HOST, port=TIDB_PORT, user=TIDB_USER,
+                            password=TIDB_PWD, database=TIDB_DB, charset='utf8mb4',
+                            autocommit=False, connect_timeout=30, read_timeout=120, write_timeout=120)
+    return _conn
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 
 SOURCES = [
@@ -39,50 +56,37 @@ TIME_LIMIT = int(os.environ.get('TIME_LIMIT', '3000'))  # 默认 50 分钟
 WRITE_FAIL = 0  # 连续写入失败计数（容错）
 
 
-def _turso_args(args):
-    if not args:
-        return None
-    return [{'type': 'text', 'value': '' if a is None else str(a)} for a in args]
-
-
 def db(sql, params=None):
     """执行 SQL，返回 dict 列表（SELECT）或 []"""
     global WRITE_FAIL
-    req = {'type': 'execute', 'stmt': {'sql': sql}}
-    if params is not None:
-        req['stmt']['args'] = _turso_args(params)
+    is_write = sql.strip().upper().startswith(('INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER'))
     for _ in range(3):
         try:
-            r = requests.post(f'{TURSO_URL}/v2/pipeline', headers=TH,
-                              json={'requests': [req]}, timeout=45)
-            j = r.json()
-            results = j.get('results')
-            if results and not j.get('error'):
-                res0 = results[0]
-                if res0.get('type') == 'ok':
-                    if sql.strip().upper().startswith('INSERT'):
-                        WRITE_FAIL = 0
-                    out = res0.get('response', {}).get('result', {})
-                    cols = [c['name'] for c in out.get('cols', [])]
-                    rows = out.get('rows', [])
-                    # Turso 返回类型化值 {'type':..., 'value':...}，解包为纯值
-                    def unwrap(v):
-                        if isinstance(v, dict) and 'type' in v:
-                            return v.get('value')
-                        return v
-                    return [{c: unwrap(r[i]) for i, c in enumerate(cols)} for r in rows]
+            conn = _get_conn()
+            cur = conn.cursor()
+            mysql_sql = sql.replace('?', '%s')
+            cur.execute(mysql_sql, params if params is not None else None)
+            if mysql_sql.strip().upper().startswith('SELECT'):
+                cols = [d[0] for d in cur.description] if cur.description else []
+                rows = cur.fetchall()
+                cur.close()
+                return [{cols[i]: r[i] for i in range(len(cols))} for r in rows]
+            conn.commit()
+            cur.close()
+            if is_write:
+                WRITE_FAIL = 0
+            return []
+        except Exception as e:
+            err = str(e)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if '1062' in err or 'Duplicate entry' in err or 'duplicate' in err.lower():
                 return []
-            # 错误处理
-            err = json.dumps(j.get('error') or results, ensure_ascii=False)
-            if 'already exists' in err.lower() or 'unique constraint' in err.lower():
-                return []
-            if sql.strip().upper().startswith('INSERT'):
+            if is_write:
                 WRITE_FAIL += 1
             print('DB错误:', err[:200], 'SQL前80:', sql[:80], flush=True)
-        except Exception as e:
-            if sql.strip().upper().startswith('INSERT'):
-                WRITE_FAIL += 1
-            print('DB重试:', str(e)[:80], flush=True)
         time.sleep(1)
     return None
 
@@ -195,7 +199,7 @@ def d1_batch_insert_movies(rows):
     for i in range(0, len(rows), n):
         chunk = rows[i:i + n]
         vals = ','.join('(' + ','.join(_esc(r[c]) for c in cols) + ')' for r in chunk)
-        sql = f"INSERT OR IGNORE INTO movies ({','.join(cols)}) VALUES {vals}"
+        sql = f"INSERT IGNORE INTO movies ({','.join(cols)}) VALUES {vals}"
         if db(sql) is None:
             ok = False
             break
@@ -211,7 +215,7 @@ def d1_batch_insert_playurls(rows):
     for i in range(0, len(rows), n):
         chunk = rows[i:i + n]
         vals = ','.join('(' + ','.join(_esc(r[c]) for c in cols) + ')' for r in chunk)
-        sql = f"INSERT OR IGNORE INTO play_urls ({','.join(cols)}) VALUES {vals}"
+        sql = f"INSERT IGNORE INTO play_urls ({','.join(cols)}) VALUES {vals}"
         if db(sql) is None:
             ok = False
             break
@@ -332,12 +336,12 @@ def collect_source(src, start_page, max_pages, existing_movies=None, existing_pl
 
 
 def main():
-    if not (TURSO_URL and TURSO_TOKEN):
+    if not (TIDB_HOST and TIDB_USER and TIDB_PWD):
         print('缺少 Turso 环境变量')
         sys.exit(1)
 
     # 确保 play_urls 唯一索引（3 列精简索引，多线路去重）
-    db("CREATE UNIQUE INDEX IF NOT EXISTS idx_play_uniq ON play_urls(movie_id, source, ep_title)")
+    # 唯一索引已在建表时创建（uk_play）
 
     # 读进度
     rows = db('SELECT source_index, source_pages, total_collected, total_skipped FROM collect_progress WHERE id=1')
